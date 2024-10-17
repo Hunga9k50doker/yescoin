@@ -1,0 +1,11 @@
+{
+  "TaskEnable": false,
+  "upgradeMultiEnable": false,
+  "upgradeFillEnable": false,
+  "upgradeCoinLimitEnable": false,
+  "maxLevel": 5,
+  "maxThreads": 10,
+  "timeSleep": 10,
+  "toDay": 1729167661644,
+  "isCheckin": false
+}
