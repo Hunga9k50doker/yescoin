@@ -3,19 +3,105 @@ const axios = require("axios");
 const colors = require("colors");
 const path = require("path");
 const crypto = require("crypto");
+const user_agents = require("./config/userAgents");
+const settings = require("./config/config");
+const { sleep, updateEnv } = require("./utils");
 
 class YesCoinBot {
   constructor() {
     this.accounts = this.loadAccounts("data.txt");
     this.tokens = this.loadTokens("token.json");
-    this.cekTaskEnable = "n";
-    this.upgradeMultiEnable = "n";
-    this.upgradeFillEnable = "n";
-    this.upgradeCoinLimitEnable = "n";
-    this.maxLevel = 5;
-    this.timeResetDaily = 0;
     this.wallet = null;
-    this.timeSleep = 3;
+    this.baseheaders = {
+      accept: "application/json, text/plain, */*",
+      "accept-language": "en-US,en;q=0.9",
+      "content-type": "application/json",
+      origin: "https://www.yescoin.gold",
+      referer: "https://www.yescoin.gold/",
+      "sec-ch-ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Microsoft Edge";v="128", "Microsoft Edge WebView2";v="128"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-site",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0",
+    };
+    this.session_name = null;
+    this.session_user_agents = this.#load_session_data();
+    this.skipTasks = settings.SKIP_TASKS;
+    this.wallets = this.loadWallets();
+  }
+
+  #load_session_data() {
+    try {
+      const filePath = path.join(process.cwd(), "session_user_agents.json");
+      const data = fs.readFileSync(filePath, "utf8");
+      return JSON.parse(data);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return {};
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  #get_random_user_agent() {
+    const randomIndex = Math.floor(Math.random() * user_agents.length);
+    return user_agents[randomIndex];
+  }
+
+  #get_user_agent() {
+    if (this.session_user_agents[this.session_name]) {
+      return this.session_user_agents[this.session_name];
+    }
+
+    this.log(`Tạo user agent...`);
+    const newUserAgent = this.#get_random_user_agent();
+    this.session_user_agents[this.session_name] = newUserAgent;
+    this.#save_session_data(this.session_user_agents);
+    return newUserAgent;
+  }
+
+  #save_session_data(session_user_agents) {
+    const filePath = path.join(process.cwd(), "session_user_agents.json");
+    fs.writeFileSync(filePath, JSON.stringify(session_user_agents, null, 2));
+  }
+
+  #get_platform(userAgent) {
+    const platformPatterns = [
+      { pattern: /iPhone/i, platform: "ios" },
+      { pattern: /Android/i, platform: "android" },
+      { pattern: /iPad/i, platform: "ios" },
+    ];
+
+    for (const { pattern, platform } of platformPatterns) {
+      if (pattern.test(userAgent)) {
+        return platform;
+      }
+    }
+
+    return "Unknown";
+  }
+
+  set_headers() {
+    const platform = this.#get_platform(this.#get_user_agent());
+    this.baseheaders["sec-ch-ua"] = `"Not)A;Brand";v="99", "${platform} WebView";v="127", "Chromium";v="127`;
+    this.baseheaders["sec-ch-ua-platform"] = platform;
+    this.baseheaders["User-Agent"] = this.#get_user_agent();
+  }
+
+  loadWallets() {
+    try {
+      const walletFile = path.join(__dirname, "wallets.txt");
+      if (fs.existsSync(walletFile)) {
+        return fs.readFileSync(walletFile, "utf8").replace(/\r/g, "").split("\n").filter(Boolean);
+      }
+      return [];
+    } catch (error) {
+      this.log(`Lỗi khi đọc file wallet: ${error.message}`, "error");
+      return [];
+    }
   }
 
   loadAccounts(filePath) {
@@ -32,22 +118,8 @@ class YesCoinBot {
 
   headers(token) {
     return {
-      accept: "application/json, text/plain, */*",
-      "accept-language": "en-US,en;q=0.9",
-      "cache-control": "no-cache",
-      "content-type": "application/json",
-      origin: "https://www.yescoin.gold",
-      pragma: "no-cache",
-      priority: "u=1, i",
-      referer: "https://www.yescoin.gold/",
-      "sec-ch-ua": '"Microsoft Edge";v="125", "Chromium";v="125", "Not.A/Brand";v="24", "Microsoft Edge WebView2";v="125"',
-      "sec-Ch-Ua-Mobile": "?1",
-      "sec-Ch-Ua-Platform": '"Android"',
-      "sec-fetch-dest": "empty",
-      "sec-fetch-mode": "cors",
-      "sec-fetch-site": "same-site",
+      ...this.baseheaders,
       token: token,
-      "user-agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36",
     };
   }
 
@@ -59,23 +131,8 @@ class YesCoinBot {
   async login(encodedData, accountIndex) {
     const url = "https://api-backend.yescoin.gold/user/login";
     const formattedPayload = this.formatLoginPayload(encodedData);
-    const headers = {
-      accept: "application/json, text/plain, */*",
-      "accept-language": "en-US,en;q=0.9",
-      "content-type": "application/json",
-      origin: "https://www.yescoin.gold",
-      referer: "https://www.yescoin.gold/",
-      "sec-ch-ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Microsoft Edge";v="128", "Microsoft Edge WebView2";v="128"',
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": '"Windows"',
-      "sec-fetch-dest": "empty",
-      "sec-fetch-mode": "cors",
-      "sec-fetch-site": "same-site",
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0",
-    };
-
     try {
-      const response = await axios.post(url, formattedPayload, { headers });
+      const response = await axios.post(url, formattedPayload, { headers: this.baseheaders });
       if (response.data.code === 0) {
         const token = response.data.data.token;
         this.saveToken(accountIndex, token);
@@ -503,13 +560,15 @@ class YesCoinBot {
   }
 
   async processTasks(token) {
-    const tasks = await this.getTaskList(token);
+    let tasks = await this.getTaskList(token);
+    tasks = tasks?.filter((task) => !settings.SKIP_TASKS.includes(task.taskId)) || [];
     if (tasks) {
       for (const task of tasks) {
+        await sleep(3);
         if (task.taskStatus === 0) {
           await this.finishTask(token, task.taskId);
         } else {
-          await this.log("Nhiệm vụ đã hoàn thành", "info");
+          // await this.log("Nhiệm vụ đã hoàn thành", "info");
         }
       }
     }
@@ -520,6 +579,7 @@ class YesCoinBot {
     const tasksDaily = await this.getTaskListDaily(token);
     if (tasksDaily)
       for (const task of tasksDaily) {
+        await sleep(3);
         if (task.missionStatus === 0) {
           await this.finishTaskDaily(token, task.missionId);
         } else {
@@ -617,6 +677,7 @@ class YesCoinBot {
       if (accountBuildInfo.code === 0) {
         const { swipeBotLevel, openSwipeBot } = accountBuildInfo.data;
         if (swipeBotLevel < 1) {
+          await sleep(3);
           const upgradeUrl = "https://api-backend.yescoin.gold/build/levelUp";
           const upgradeResponse = await this.makeRequest("post", upgradeUrl, 4, token);
           if (upgradeResponse.code === 0) {
@@ -627,6 +688,7 @@ class YesCoinBot {
         }
 
         if (swipeBotLevel >= 1 && !openSwipeBot) {
+          await sleep(3);
           const toggleUrl = "https://api-backend.yescoin.gold/build/toggleSwipeBotSwitch";
           const toggleResponse = await this.makeRequest("post", toggleUrl, true, token);
           if (toggleResponse.code === 0) {
@@ -637,6 +699,7 @@ class YesCoinBot {
         }
 
         if (swipeBotLevel >= 1 && openSwipeBot) {
+          await sleep(3);
           const offlineBonusUrl = "https://api-backend.yescoin.gold/game/getOfflineYesPacBonusInfo";
           const offlineBonusInfo = await this.makeRequest("get", offlineBonusUrl, null, token);
           if (offlineBonusInfo.code === 0 && offlineBonusInfo.data.length > 0) {
@@ -658,25 +721,12 @@ class YesCoinBot {
             const secretKey = "6863b339db454f5bbd42ffb5b5ac9841";
             const sign = this.generateClaimSign(signParams, secretKey);
             const headers = {
-              Accept: "application/json, text/plain, */*",
-              "Accept-Language": "en-US,en;q=0.9",
-              "Cache-Control": "no-cache",
-              "Content-Type": "application/json",
-              Origin: "https://www.yescoin.gold",
-              Pragma: "no-cache",
-              Referer: "https://www.yescoin.gold/",
-              "Sec-Ch-Ua": '"Not.A/Brand";v="8", "Chromium";v="114"',
-              "Sec-Ch-Ua-Mobile": "?0",
-              "Sec-Ch-Ua-Platform": '"Windows"',
-              "Sec-Fetch-Dest": "empty",
-              "Sec-Fetch-Mode": "cors",
-              "Sec-Fetch-Site": "same-site",
+              ...this.baseheaders,
               Sign: sign,
               Tm: tm.toString(),
               Token: token,
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             };
-
+            await sleep(3);
             const claimResponse = await this.makeRequest("post", claimUrl, claimData, token, headers);
             if (claimResponse.code === 0) {
               await this.log(`Claim offline bonus thành công, nhận ${claimResponse.data.collectAmount} coins`, "success");
@@ -693,74 +743,43 @@ class YesCoinBot {
     }
   }
 
-  quest() {
-    const readline = require("readline").createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    return new Promise((resolve) => {
-      readline.question("Bạn có muốn làm nhiệm vụ không? (y/n, mặc định n): ", (taskAnswer) => {
-        this.cekTaskEnable = taskAnswer.toLowerCase() === "y" ? "y" : "n";
-        readline.question(`Thời gian nghỉ mỗi vòng lặp(phút)? (mặc định ${this.timeSleep || 3} phút): `, (timeSleep) => {
-          this.timeSleep = timeSleep ? parseInt(timeSleep) : 3;
-          readline.question("Bạn có muốn nâng cấp multi không? (y/n, mặc định n): ", (multiAnswer) => {
-            this.upgradeMultiEnable = multiAnswer.toLowerCase() === "y" ? "y" : "n";
-            readline.question("Bạn có muốn nâng cấp coinlimit không? (y/n, mặc định n): ", (coinLimitAnswer) => {
-              this.upgradeCoinLimitEnable = coinLimitAnswer.toLowerCase() === "y" ? "y" : "n";
-              readline.question("Bạn có muốn nâng cấp fill rate không? (y/n, mặc định n): ", (fillAnswer) => {
-                this.upgradeFillEnable = fillAnswer.toLowerCase() === "y" ? "y" : "n";
-
-                if (this.upgradeMultiEnable === "y" || this.upgradeFillEnable === "y" || this.upgradeCoinLimitEnable === "y") {
-                  readline.question("Nhập lv tối đa để nâng cấp (mặc định: 5): ", (maxLevelAnswer) => {
-                    this.maxLevel = maxLevelAnswer ? parseInt(maxLevelAnswer) : 5;
-                    readline.close();
-                    resolve();
-                  });
-                } else {
-                  this.maxLevel = 5;
-                  readline.close();
-                  resolve();
-                }
-              });
-            });
-          });
-        });
-      });
-    });
-  }
-
   async main() {
     this.log(colors.yellow("Tool được phát triển bởi nhóm tele Airdrop Hunter Siêu Tốc (https://t.me/airdrophuntersieutoc)"));
-    const today = new Date();
     while (true) {
-      const nowTime = new Date();
-      const isYesterday = nowTime - today >= 24 * 60 * 60 * 1000 ? true : false;
       for (let i = 0; i < this.accounts.length; i++) {
-        const accountIndex = (i + 1).toString();
+        const accountIndex = i + 1;
         const encodedData = this.accounts[i];
         let token;
+        const userData = JSON.parse(decodeURIComponent(encodedData.split("user=")[1].split("&")[0]));
+        const firstName = userData.first_name || "";
+        const lastName = userData.last_name || "";
+        const userId = userData.id;
+        this.session_name = userId;
+        console.log(`=========Tài khoản ${accountIndex}| ${firstName + " " + lastName}=============`.green);
+
+        this.set_headers();
         try {
-          token = await this.getOrRefreshToken(encodedData, accountIndex);
+          token = await this.getOrRefreshToken(encodedData, userId);
         } catch (error) {
-          await this.log(`Không thể lấy token cho tài khoản ${accountIndex}: ${error.message}`, "error");
+          await this.log(`Không thể lấy token cho tài khoản ${firstName + " " + lastName}: ${error.message}`, "error");
           continue;
         }
-        await this.randomDelay();
-        const nickname = await this.getuser(token);
-        await this.log(`========== Tài khoản ${accountIndex} | ${nickname} ==========`, "info");
+        // const nickname = await this.getuser(token);
 
-        await this.randomDelay();
-        const squadInfo = await this.getSquadInfo(token);
-        if (squadInfo && squadInfo?.data?.isJoinSquad && squadInfo.data.squadInfo.squadId != "1832357488363344000") {
-          await this.lSquad(token);
-          await this.joinSquad(token, "t.me/airdrophuntersieutoc");
-        } else if (!squadInfo.data.isJoinSquad) {
+        if (settings.AUTO_JOIN_SQUARD) {
           await this.randomDelay();
-          const joinResult = await this.joinSquad(token, "t.me/airdrophuntersieutoc");
-          if (joinResult) {
-            await this.log(`Squad: Gia nhập Squad thành công !`, "success");
-          } else {
-            await this.log(`Squad: Gia nhập Squad thất bại !`, "error");
+          const squadInfo = await this.getSquadInfo(token);
+          if (squadInfo && squadInfo?.data?.isJoinSquad && squadInfo?.data?.squadInfo?.squadId != "1832357488363344000") {
+            await this.lSquad(token);
+            await this.joinSquad(token, "t.me/airdrophuntersieutoc");
+          } else if (!squadInfo?.data?.isJoinSquad) {
+            await this.randomDelay();
+            const joinResult = await this.joinSquad(token, "t.me/airdrophuntersieutoc");
+            if (joinResult) {
+              await this.log(`Squad: Gia nhập Squad thành công !`, "success");
+            } else {
+              await this.log(`Squad: Gia nhập Squad thất bại !`, "error");
+            }
           }
         }
 
@@ -786,7 +805,7 @@ class YesCoinBot {
           await this.log(`Coin Limit: Level ${singleCoinLevel}`, "info");
           await this.log(`Fill Rate: Level ${coinPoolRecoverySpeed}`, "info");
         }
-        if (this.timeResetDaily == 0 || isYesterday) {
+        if (settings.AUTO_DAILY_REWARD) {
           await this.randomDelay();
           this.log("Bắt đầu checkin");
           await this.checkIn(token);
@@ -794,29 +813,30 @@ class YesCoinBot {
           await this.processTasksDaily(token);
           await this.getDailyTaskBonus(token);
         }
+
         await this.handleSwipeBot(token);
-        if (this.cekTaskEnable === "y") {
+        if (settings.AUTO_TASK) {
           await this.randomDelay();
           await this.log("Bắt đầu làm nhiệm vụ...", "info");
           await this.processTasks(token);
         }
 
-        if (this.upgradeMultiEnable === "y") {
+        if (settings.AUTO_UPGRADE_MULTI) {
           await this.randomDelay();
           await this.log("Bắt đầu nâng cấp multi...", "info");
-          await this.upgradeLevel(token, gameInfo.data.singleCoinValue, this.maxLevel, "1");
+          await this.upgradeLevel(token, gameInfo.data.singleCoinValue, settings.MAX_LEVEL_UPGRADE, "1");
         }
 
-        if (this.upgradeFillEnable === "y") {
+        if (settings.AUTO_UPGRADE_FILL) {
           await this.randomDelay();
           await this.log("Bắt đầu nâng cấp Fill Rate....", "info");
-          await this.upgradeLevel(token, gameInfo.data.coinPoolRecoverySpeed, this.maxLevel, "2");
+          await this.upgradeLevel(token, gameInfo.data.coinPoolRecoverySpeed, settings.MAX_LEVEL_UPGRADE, "2");
         }
 
-        if (this.upgradeCoinLimitEnable === "y") {
+        if (settings.AUTO_UPGRADE_COINLIMIT) {
           await this.randomDelay();
           await this.log("Bắt đầu nâng cấp Coinlimit....", "info");
-          await this.upgradeLevel(token, gameInfo.data.coinPoolTotalLevel, this.maxLevel, "3");
+          await this.upgradeLevel(token, gameInfo.data.coinPoolTotalLevel, settings.MAX_LEVEL_UPGRADE, "3");
         }
 
         await this.randomDelay();
@@ -847,7 +867,7 @@ class YesCoinBot {
           if (await this.useSpecialBox(token)) {
             await this.randomDelay();
             await this.log("Bắt đầu thu thập...", "info");
-            const collectedAmount = await this.attemptCollectSpecialBox(token, 2, 240);
+            await this.attemptCollectSpecialBox(token, 2, 240);
           }
         } else {
           await this.log("Không có rương nào!", "warning");
@@ -884,12 +904,15 @@ class YesCoinBot {
         const freeChestCollectedAmount = await this.attemptCollectSpecialBox(token, 1, 200);
       }
 
-      await this.wait(this.timeSleep * 60 || 3 * 60);
+      updateEnv("AUTO_DAILY_REWARD", "false");
+      await sleep(3);
+      await this.wait(settings.TIME_SLEEP * 60);
     }
   }
 }
 
 const bot = new YesCoinBot();
-bot.quest().then(() => {
-  bot.main();
+bot.main().catch((err) => {
+  console.error(err);
+  process.exit(1);
 });

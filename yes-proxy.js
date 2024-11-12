@@ -1,10 +1,15 @@
 const fs = require("fs");
 const axios = require("axios");
 const colors = require("colors");
+const path = require("path");
 const readline = require("readline");
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
 const crypto = require("crypto");
+const { parse } = require("querystring");
+const user_agents = require("./config/userAgents");
+const settings = require("./config/config");
+const { sleep, getRandomNumber, updateEnv } = require("./utils");
 
 class YesCoinBot {
   constructor(accountIndex, account, proxy) {
@@ -15,11 +20,110 @@ class YesCoinBot {
     this.token = null;
     this.timeout = 30000;
     this.wallet = null;
-    this.config = loadConfig();
+    this.baseheaders = {
+      accept: "application/json, text/plain, */*",
+      "accept-language": "en-US,en;q=0.9",
+      "content-type": "application/json",
+      origin: "https://www.yescoin.gold",
+      referer: "https://www.yescoin.gold/",
+      "sec-ch-ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Microsoft Edge";v="128", "Microsoft Edge WebView2";v="128"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-site",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0",
+    };
+    this.session_name = null;
+    this.session_user_agents = this.#load_session_data();
+    this.skipTasks = settings.SKIP_TASKS;
+    this.wallets = this.loadWallets();
+  }
+
+  #load_session_data() {
+    try {
+      const filePath = path.join(process.cwd(), "session_user_agents.json");
+      const data = fs.readFileSync(filePath, "utf8");
+      return JSON.parse(data);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return {};
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  #get_random_user_agent() {
+    const randomIndex = Math.floor(Math.random() * user_agents.length);
+    return user_agents[randomIndex];
+  }
+
+  #get_user_agent() {
+    if (this.session_user_agents[this.session_name]) {
+      return this.session_user_agents[this.session_name];
+    }
+
+    this.log(`Tạo user agent...`);
+    const newUserAgent = this.#get_random_user_agent();
+    this.session_user_agents[this.session_name] = newUserAgent;
+    this.#save_session_data(this.session_user_agents);
+    return newUserAgent;
+  }
+
+  #save_session_data(session_user_agents) {
+    const filePath = path.join(process.cwd(), "session_user_agents.json");
+    fs.writeFileSync(filePath, JSON.stringify(session_user_agents, null, 2));
+  }
+
+  #get_platform(userAgent) {
+    const platformPatterns = [
+      { pattern: /iPhone/i, platform: "ios" },
+      { pattern: /Android/i, platform: "android" },
+      { pattern: /iPad/i, platform: "ios" },
+    ];
+
+    for (const { pattern, platform } of platformPatterns) {
+      if (pattern.test(userAgent)) {
+        return platform;
+      }
+    }
+
+    return "Unknown";
+  }
+
+  set_headers() {
+    const platform = this.#get_platform(this.#get_user_agent());
+    this.baseheaders["sec-ch-ua"] = `"Not)A;Brand";v="99", "${platform} WebView";v="127", "Chromium";v="127`;
+    this.baseheaders["sec-ch-ua-platform"] = platform;
+    this.baseheaders["User-Agent"] = this.#get_user_agent();
+  }
+
+  loadWallets() {
+    try {
+      const walletFile = path.join(__dirname, "wallets.txt");
+      if (fs.existsSync(walletFile)) {
+        return fs.readFileSync(walletFile, "utf8").replace(/\r/g, "").split("\n").filter(Boolean);
+      }
+      return [];
+    } catch (error) {
+      this.log(`Lỗi khi đọc file wallet: ${error.message}`, "error");
+      return [];
+    }
+  }
+
+  createUserAgent() {
+    try {
+      const telegramauth = this.account;
+      const userData = JSON.parse(decodeURIComponent(telegramauth.split("user=")[1].split("&")[0]));
+      this.session_name = userData.id;
+      this.#get_user_agent();
+    } catch (error) {
+      this.log(`Lỗi rồi, vui lòng cập nhật lại query_id; ${error.message}`);
+    }
   }
 
   async log(msg, type = "info") {
-    const timestamp = new Date().toLocaleTimeString();
     const accountPrefix = `[Tài khoản ${this.accountIndex + 1}]`;
     const ipPrefix = this.proxyIP ? `[${this.proxyIP}]` : "[Unknown IP]";
     let logMessage = "";
@@ -44,22 +148,8 @@ class YesCoinBot {
 
   headers(token) {
     return {
-      accept: "application/json, text/plain, */*",
-      "accept-language": "en-US,en;q=0.9",
-      "cache-control": "no-cache",
-      "content-type": "application/json",
-      origin: "https://www.yescoin.gold",
-      pragma: "no-cache",
-      priority: "u=1, i",
-      referer: "https://www.yescoin.gold/",
-      "sec-ch-ua": '"Microsoft Edge";v="125", "Chromium";v="125", "Not.A/Brand";v="24", "Microsoft Edge WebView2";v="125"',
-      "sec-Ch-Ua-Mobile": "?1",
-      "sec-Ch-Ua-Platform": '"Android"',
-      "sec-fetch-dest": "empty",
-      "sec-fetch-mode": "cors",
-      "sec-fetch-site": "same-site",
+      ...this.baseheaders,
       token: token,
-      "user-agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36",
     };
   }
 
@@ -71,21 +161,7 @@ class YesCoinBot {
   async login(encodedData, proxy) {
     const url = "https://api-backend.yescoin.gold/user/login";
     const formattedPayload = this.formatLoginPayload(encodedData);
-    const headers = {
-      accept: "application/json, text/plain, */*",
-      "accept-language": "en-US,en;q=0.9",
-      "content-type": "application/json",
-      origin: "https://www.yescoin.gold",
-      referer: "https://www.yescoin.gold/",
-      "sec-ch-ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Microsoft Edge";v="128", "Microsoft Edge WebView2";v="128"',
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": '"Windows"',
-      "sec-fetch-dest": "empty",
-      "sec-fetch-mode": "cors",
-      "sec-fetch-site": "same-site",
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0",
-    };
-
+    const headers = this.baseheaders;
     try {
       const proxyAgent = new HttpsProxyAgent(proxy);
       const response = await axios.post(url, formattedPayload, {
@@ -103,32 +179,32 @@ class YesCoinBot {
     }
   }
 
-  async saveToken(accountIndex, token) {
+  async saveToken(id, token) {
     let tokens = {};
     if (fs.existsSync("token.json")) {
       tokens = JSON.parse(fs.readFileSync("token.json", "utf-8"));
     }
-    tokens[accountIndex] = token;
+    tokens[id] = token;
     fs.writeFileSync("token.json", JSON.stringify(tokens, null, 2));
   }
 
-  loadToken(accountIndex) {
+  loadToken(id) {
     if (fs.existsSync("token.json")) {
       const tokens = JSON.parse(fs.readFileSync("token.json", "utf-8"));
-      return tokens[accountIndex];
+      return tokens[id];
     }
     return null;
   }
 
   async getOrRefreshToken(encodedData, proxy) {
-    const savedToken = this.loadToken(this.accountIndex);
+    const savedToken = this.loadToken(this.session_name);
     if (savedToken) {
       this.token = savedToken;
       return this.token;
     }
 
     this.token = await this.login(encodedData, proxy);
-    await this.saveToken(this.accountIndex, this.token);
+    await this.saveToken(this.session_name, this.token);
     return this.token;
   }
 
@@ -150,6 +226,7 @@ class YesCoinBot {
 
   async makeRequest(method, url, data = null, token, proxy, extraHeaders = {}) {
     const defaultHeaders = this.headers(token);
+    // console.log(defaultHeaders);
     const headers = {
       ...defaultHeaders,
       ...extraHeaders,
@@ -422,18 +499,21 @@ class YesCoinBot {
   }
 
   async processTasks(token, proxy) {
-    const tasks = await this.getTaskList(token, proxy);
+    let tasks = await this.getTaskList(token, proxy);
+    tasks = tasks?.filter((task) => !settings.SKIP_TASKS.includes(task.taskId)) || [];
     const tasksUpgrade = await this.getUpgradeTaskList(token, proxy);
     // console.log("tasksUpgrade", tasksUpgrade);
     const listTaskBonusUpgrade = tasksUpgrade?.taskBonusBaseResponseList || [];
     const userLevel = tasksUpgrade?.userLevel || 0;
     if (tasks) {
       for (const task of tasks) {
+        await sleep(3);
         if (task.taskStatus === 0) {
           await this.finishTask(token, task.taskId, proxy);
         }
       }
     }
+    await sleep(3);
     if (listTaskBonusUpgrade) {
       for (const taskUpgrade of listTaskBonusUpgrade) {
         if (taskUpgrade.taskStatus === 0 && taskUpgrade.taskUserLevel < userLevel) {
@@ -672,6 +752,7 @@ class YesCoinBot {
         }
 
         if (swipeBotLevel >= 1 && !openSwipeBot) {
+          await sleep();
           const toggleUrl = "https://api-backend.yescoin.gold/build/toggleSwipeBotSwitch";
           const toggleResponse = await this.makeRequest("post", toggleUrl, true, token, proxy);
           if (toggleResponse.code === 0) {
@@ -682,6 +763,7 @@ class YesCoinBot {
         }
 
         if (swipeBotLevel >= 1 && openSwipeBot) {
+          await sleep();
           const offlineBonusUrl = "https://api-backend.yescoin.gold/game/getOfflineYesPacBonusInfo";
           const offlineBonusInfo = await this.makeRequest("get", offlineBonusUrl, null, token, proxy);
           if (offlineBonusInfo.code === 0 && offlineBonusInfo.data.length > 0) {
@@ -703,25 +785,12 @@ class YesCoinBot {
             const secretKey = "6863b339db454f5bbd42ffb5b5ac9841";
             const sign = this.generateClaimSign(signParams, secretKey);
             const headers = {
-              Accept: "application/json, text/plain, */*",
-              "Accept-Language": "en-US,en;q=0.9",
-              "Cache-Control": "no-cache",
-              "Content-Type": "application/json",
-              Origin: "https://www.yescoin.gold",
-              Pragma: "no-cache",
-              Referer: "https://www.yescoin.gold/",
-              "Sec-Ch-Ua": '"Not.A/Brand";v="8", "Chromium";v="114"',
-              "Sec-Ch-Ua-Mobile": "?0",
-              "Sec-Ch-Ua-Platform": '"Windows"',
-              "Sec-Fetch-Dest": "empty",
-              "Sec-Fetch-Mode": "cors",
-              "Sec-Fetch-Site": "same-site",
+              ...this.baseheaders,
               Sign: sign,
               Tm: tm.toString(),
               Token: token,
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             };
-
+            await sleep();
             const claimResponse = await this.makeRequest("post", claimUrl, claimData, token, proxy, headers);
             if (claimResponse.code === 0) {
               await this.log(`Claim offline bonus thành công, nhận ${claimResponse.data.collectAmount} coins`, "success");
@@ -757,12 +826,22 @@ class YesCoinBot {
 
   async main() {
     try {
+      const encodedData = this.account;
+      const userData = JSON.parse(decodeURIComponent(encodedData.split("user=")[1].split("&")[0]));
+      const firstName = userData.first_name || "";
+      const lastName = userData.last_name || "";
+      const userId = userData.id;
+      this.session_name = userId;
+      const timesleep = getRandomNumber(settings.DELAY_START_BOT[0], settings.DELAY_START_BOT[1]);
+      console.log(`=========Tài khoản ${this.accountIndex + 1} | ${firstName + " " + lastName}| Nghỉ ${timesleep} trước khi bắt đầu=============`.green);
+      this.set_headers();
+      await sleep(timesleep);
       try {
         this.proxyIP = await this.performTaskWithTimeout(() => this.checkProxyIP(this.proxy), "Checking proxy IP", 10000);
         await this.log(`Proxy IP: ${this.proxyIP}`, "info");
       } catch (error) {
         await this.log(`Lỗi kiểm tra IP proxy: ${error.message}`, "error");
-        return;
+        process.exit(0);
       }
 
       try {
@@ -783,22 +862,23 @@ class YesCoinBot {
 
   async performTasks() {
     try {
-      const nickname = await this.performTaskWithTimeout(() => this.getuser(this.token, this.proxy), "Getting user info", 15000);
-      await this.log(`Tài khoản: ${nickname}`, "info");
+      // const nickname = await this.performTaskWithTimeout(() => this.getuser(this.token, this.proxy), "Getting user info", 15000);
 
-      const squadInfo = await this.performTaskWithTimeout(() => this.getSquadInfo(this.token, this.proxy), "Getting squad info", 15000);
-      if (squadInfo && squadInfo?.data?.isJoinSquad && squadInfo.data.squadInfo.squadId != "1832357488363344000") {
-        await this.lSquad(this.token, this.proxy);
-        await this.joinSquad(this.token, "t.me/airdrophuntersieutoc");
-      } else if (!squadInfo?.data?.isJoinSquad) {
-        const joinResult = await this.performTaskWithTimeout(() => this.joinSquad(this.token, "t.me/airdrophuntersieutoc", this.proxy), "Joining squad", 20000);
-        if (joinResult) {
-          await this.log(`Squad: ${nickname} gia nhập Squad thành công !`, "success");
-        } else {
-          await this.log(`Squad: ${nickname} gia nhập Squad thất bại !`, "error");
+      if (settings.AUTO_JOIN_SQUARD) {
+        const squadInfo = await this.performTaskWithTimeout(() => this.getSquadInfo(this.token, this.proxy), "Getting squad info", 15000);
+        if (squadInfo && squadInfo?.data?.isJoinSquad && squadInfo.data.squadInfo.squadId != "1832357488363344000") {
+          await this.lSquad(this.token, this.proxy);
+          await this.joinSquad(this.token, "t.me/airdrophuntersieutoc");
+        } else if (!squadInfo?.data?.isJoinSquad) {
+          const joinResult = await this.performTaskWithTimeout(() => this.joinSquad(this.token, "t.me/airdrophuntersieutoc", this.proxy), "Joining squad", 20000);
+          if (joinResult) {
+            await this.log(`Bạn gia nhập Squad thành công !`, "success");
+          } else {
+            await this.log(`Bạn gia nhập Squad thất bại !`, "error");
+          }
         }
       }
-
+      await sleep();
       const balance = await this.performTaskWithTimeout(() => this.getAccountInfo(this.token, this.proxy), "Getting account info", 15000);
       if (balance === null) {
         await this.log("Balance: Không đọc được balance", "error");
@@ -816,24 +896,30 @@ class YesCoinBot {
         await this.log(`Multivalue: ${singleCoinValue} | Coin Limit: ${singleCoinLevel} | Fill Rate: ${coinPoolRecoverySpeed} | Swipe Bot: ${swipeBotLevel}`, "info");
       }
 
-      if (this.config.isCheckin) {
+      if (settings.AUTO_DAILY_REWARD) {
         await this.performTaskWithTimeout(() => this.checkIn(this.token, this.proxy), "Processing checkin", 60000);
+        await sleep(3);
         await this.performTaskWithTimeout(() => this.processTasksDaily(this.token, this.proxy), "Processing tasksdaily", 60000);
+        await sleep(3);
         await this.performTaskWithTimeout(() => this.getDailyTaskBonus(this.token, this.proxy), "Processing tasksdaily", 60000);
       }
+      await sleep(3);
       await this.performTaskWithTimeout(() => this.handleSwipeBot(this.token, this.proxy), "Handling SwipeBot", 30000);
-      if (this.config.TaskEnable) {
+      if (settings.AUTO_TASK) {
         await this.performTaskWithTimeout(() => this.processTasks(this.token, this.proxy), "Processing tasks", 60000);
       }
 
-      if (this.config.upgradeMultiEnable && gameInfo) {
-        await this.performTaskWithTimeout(() => this.upgradeLevel(this.token, gameInfo.data.singleCoinValue, this.config.maxLevel, "1", this.proxy), "Upgrading Multi", 60000);
+      if (settings.AUTO_UPGRADE_MULTI && gameInfo) {
+        await sleep();
+        await this.performTaskWithTimeout(() => this.upgradeLevel(this.token, gameInfo.data.singleCoinValue, settings.MAX_LEVEL_UPGRADE, "1", this.proxy), "Upgrading Multi", 60000);
       }
-      if (this.config.upgradeFillEnable && gameInfo) {
-        await this.performTaskWithTimeout(() => this.upgradeLevel(this.token, gameInfo.data.coinPoolRecoverySpeed, this.config.maxLevel, "2", this.proxy), "Upgrading Fill", 60000);
+      if (settings.AUTO_UPGRADE_FILL && gameInfo) {
+        await sleep();
+        await this.performTaskWithTimeout(() => this.upgradeLevel(this.token, gameInfo.data.coinPoolRecoverySpeed, settings.MAX_LEVEL_UPGRADE, "2", this.proxy), "Upgrading Fill", 60000);
       }
-      if (this.config.upgradeCoinLimitEnable && gameInfo) {
-        await this.performTaskWithTimeout(() => this.upgradeLevel(this.token, gameInfo.data.coinPoolTotalLevel, this.config.maxLevel, "3", this.proxy), "Upgrading Coinlimit", 60000);
+      if (settings.AUTO_UPGRADE_COINLIMIT && gameInfo) {
+        await sleep();
+        await this.performTaskWithTimeout(() => this.upgradeLevel(this.token, gameInfo.data.coinPoolTotalLevel, settings.MAX_LEVEL_UPGRADE, "3", this.proxy), "Upgrading Coinlimit", 60000);
       }
       const collectInfo = await this.performTaskWithTimeout(() => this.getGameInfo(this.token, this.proxy), "Getting collect info", 15000);
       if (collectInfo === null) {
@@ -841,7 +927,7 @@ class YesCoinBot {
       } else {
         const { singleCoinValue, coinPoolLeftCount } = collectInfo.data;
         await this.log(`Năng lượng còn lại ${coinPoolLeftCount}`, "info");
-
+        await sleep();
         if (coinPoolLeftCount > 0) {
           const amount = Math.floor(coinPoolLeftCount / singleCoinValue);
           const collectResult = await this.performTaskWithTimeout(() => this.collectCoin(this.token, amount, this.proxy), "Collecting coins", 30000);
@@ -853,7 +939,7 @@ class YesCoinBot {
           }
         }
       }
-
+      await sleep();
       if (gameInfo && gameInfo.data.specialBoxLeftRecoveryCount > 0) {
         const useSpecialBoxResult = await this.performTaskWithTimeout(() => this.useSpecialBox(this.token, this.proxy), "Using special box", 30000);
         if (useSpecialBoxResult) {
@@ -861,6 +947,7 @@ class YesCoinBot {
           await this.log(`Collected ${collectedAmount} from special box`, "success");
         }
       }
+      await sleep();
 
       const updatedGameInfo = await this.performTaskWithTimeout(() => this.getAccountBuildInfo(this.token, this.proxy), "Getting updated game info", 15000);
       if (updatedGameInfo && updatedGameInfo.data.coinPoolLeftRecoveryCount > 0) {
@@ -891,22 +978,6 @@ class YesCoinBot {
   }
 }
 
-function loadConfig() {
-  return JSON.parse(fs.readFileSync("config.json", "utf-8"));
-}
-
-async function saveConfig(newCf) {
-  let config = {};
-  if (fs.existsSync("config.json")) {
-    config = JSON.parse(fs.readFileSync("config.json", "utf-8"));
-  }
-  config = {
-    ...config,
-    ...newCf,
-  };
-  return await fs.writeFileSync("config.json", JSON.stringify(config, null, 2), "utf-8");
-}
-
 async function wait(seconds) {
   for (let i = seconds; i > 0; i--) {
     process.stdout.write(`\r${colors.cyan(`[*] Chờ ${Math.floor(i / 60)} phút ${i % 60} giây để tiếp tục`)}`.padEnd(80));
@@ -917,110 +988,39 @@ async function wait(seconds) {
   console.log(`Bắt đầu vòng lặp mới...`);
 }
 
-async function quest() {
-  console.log(colors.yellow("Tool được phát triển bởi nhóm tele Airdrop Hunter Siêu Tốc (https://t.me/airdrophuntersieutoc)"));
-  const readline = require("readline").createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  let newConfig = JSON.parse(fs.readFileSync("config.json", "utf-8"));
-  let isMulti = newConfig?.upgradeMultiEnable,
-    isFill = newConfig?.upgradeFillEnable,
-    coinLimit = newConfig?.upgradeCoinLimitEnable;
-  await new Promise((resolve) => {
-    readline.question(`Bạn muốn chạy bao nhiêu luồng cùng lúc? (mặc định ${newConfig?.maxThreads || 10}): `, (threads) => {
-      newConfig.maxThreads = threads ? parseInt(threads) : 10;
-      readline.question(`Thời gian nghỉ mỗi vòng lặp(phút)? (mặc định ${newConfig?.timeSleep || 3} phút): `, (timeSleep) => {
-        newConfig.timeSleep = timeSleep ? parseInt(timeSleep) : 3;
-        readline.question(`Bạn có muốn làm nhiệm vụ không? (y/n, mặc định ${newConfig?.TaskEnable ? "y" : "n"}): `, (taskAnswer) => {
-          newConfig.TaskEnable = taskAnswer.toLowerCase() === "y";
-          readline.question(`Bạn có muốn nâng cấp multi không? (y/n, mặc định ${isMulti ? "y" : "n"}): `, (multiAnswer) => {
-            if ((multiAnswer.toLowerCase() !== "n" && isMulti) || multiAnswer.toLowerCase() === "y") {
-              newConfig.upgradeMultiEnable = true;
-              isMulti = true;
-            } else {
-              newConfig.upgradeMultiEnable = false;
-              isMulti = false;
-            }
-            readline.question(`Bạn có muốn nâng cấp coinlimit không? (y/n, mặc định ${coinLimit ? "y" : "n"}): `, (coinLimitAnswer) => {
-              if ((coinLimitAnswer.toLowerCase() !== "n" && coinLimit) || coinLimitAnswer.toLowerCase() === "y") {
-                newConfig.upgradeCoinLimitEnable = true;
-                coinLimit = true;
-              } else {
-                newConfig.upgradeCoinLimitEnable = false;
-                coinLimit = false;
-              }
-              readline.question(`Bạn có muốn nâng cấp fill rate không? (y/n, mặc định ${isFill ? "y" : "n"}): `, (fillAnswer) => {
-                if ((fillAnswer.toLowerCase() !== "n" && isFill) || fillAnswer.toLowerCase() === "y") {
-                  newConfig.upgradeFillEnable = true;
-                  isFill = true;
-                } else {
-                  newConfig.upgradeFillEnable = false;
-                  isFill = false;
-                }
-
-                if (isFill || isMulti || coinLimit) {
-                  readline.question(`Nhập lv tối đa để nâng cấp (mặc định: ${newConfig?.maxLevel || 5}): `, (maxLevelAnswer) => {
-                    newConfig.maxLevel = maxLevelAnswer ? parseInt(maxLevelAnswer) : 5;
-                    readline.close();
-                    resolve();
-                  });
-                } else {
-                  newConfig.maxLevel = 5;
-                  readline.close();
-                  resolve();
-                }
-              });
-            });
-          });
-        });
-      });
-    });
-  });
-  return await saveConfig({
-    ...newConfig,
-    toDay: Date.now(),
-    isCheckin: true,
-  });
-}
-
 async function runworker() {
-  // let isCheckin = config.isCheckin;
   const accounts = fs.readFileSync("data.txt", "utf-8").replace(/\r/g, "").split("\n").filter(Boolean);
   const proxies = fs.readFileSync("proxy.txt", "utf-8").replace(/\r/g, "").split("\n").filter(Boolean);
   let activeWorkers = 0;
 
-  async function processCycle(config) {
-    const numThreads = Math.min(config.maxThreads || 10, accounts.length);
+  accounts.map((account, i) => new YesCoinBot(i, account, proxies[i]).createUserAgent());
+
+  async function processCycle() {
+    const numThreads = Math.min(settings.MAX_THEADS || 10, accounts.length);
     let accountQueue = [...accounts];
     async function startWorker() {
       if (accountQueue.length === 0) {
         if (activeWorkers === 0) {
           console.log("Hoàn thành tất cả tài khoản.".magenta);
-          const timeNow = Date.now();
-          if (timeNow - config.toDay >= 24 * 60 * 60 * 1000) {
-            await saveConfig({
-              isCheckin: true,
-            });
-          } else {
-            await saveConfig({
-              isCheckin: false,
-            });
-          }
-          await wait(config?.timeSleep ? config?.timeSleep * 60 : 3 * 60);
-          processCycle(config);
+          updateEnv("AUTO_DAILY_REWARD", "false");
+          await sleep(3);
+          await wait(settings.TIME_SLEEP * 60);
+          processCycle();
         }
         return;
       }
-
       const accountIndex = accounts.length - accountQueue.length;
       const account = accountQueue.shift();
       const proxy = proxies[accountIndex % proxies.length];
+      const parser = parse(account);
+      const user = JSON.parse(parser.user);
+      const userid = user.id;
 
       activeWorkers++;
 
       const worker = new Worker(__filename, {
         workerData: {
+          userId: userid,
           accountIndex: accountIndex,
           account: account,
           proxy: proxy,
@@ -1053,11 +1053,7 @@ async function runworker() {
     }
   }
 
-  (async () => {
-    await quest();
-    const config = await loadConfig();
-    processCycle(config);
-  })();
+  processCycle();
 }
 
 if (isMainThread) {

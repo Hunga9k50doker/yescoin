@@ -4,3 +4,5 @@ package-lock.json
 proxy.txt
 data.txt
 token.json
+
+.gitignore
